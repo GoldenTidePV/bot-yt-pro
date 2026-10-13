@@ -1,83 +1,98 @@
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode');
 const express = require('express');
-const ytdl = require('@distube/ytdl-core');
 const yts = require('yt-search');
 const fs = require('fs');
+const puppeteer = require('puppeteer');
 
-let lastQR = null;
-let busy = false;
-const cacheBusqueda = new Map();
 const app = express();
 const PORT = process.env.PORT || 10000;
+let qrCodeData = null;
+let isReady = false;
+
+app.get('/', (req, res) => {
+    if (isReady) {
+        res.send('<h1 style="font-family:sans-serif;text-align:center;margin-top:50px">✅ BOT CONECTADO Y LISTO</h1>');
+    } else if (qrCodeData) {
+        qrcode.toDataURL(qrCodeData, (err, url) => {
+            if (err) return res.send('Error generando QR');
+            res.send(`<div style="text-align:center;margin-top:20px;font-family:sans-serif"><h2>Escanea este QR en WhatsApp</h2><img src="${url}" style="width:300px"><p>Bot: ${new Date().toLocaleString()}</p><script>setTimeout(()=>location.reload(),15000)</script></div>`);
+        });
+    } else {
+        res.send('<h1 style="font-family:sans-serif;text-align:center;margin-top:50px">Iniciando bot... espera 30 seg y recarga</h1>');
+    }
+});
+
+app.get('/ping', (req, res) => res.send('pong'));
+app.listen(PORT, () => console.log('WEB en puerto ' + PORT));
+
+console.log('Iniciando cliente de WhatsApp...');
+console.log('Chrome path:', puppeteer.executablePath());
 
 const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: 'auth' }),
-  puppeteer: {
-    headless: true,
-    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process','--no-zygote']
-  }
-});
-
-client.on('qr', qr => { lastQR = qr; });
-client.on('ready', () => { lastQR = null; console.log('BOT LISTO'); });
-
-function extraerLink(t){
-  const m=t.match(/(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com)\S+/i);
-  return m?m[0]:null;
-}
-async function descargar(msg, url, esVideo){
-  if(busy){ await msg.reply('⏳ Ya estoy bajando otro, espera 30s'); return; }
-  busy=true;
-  let ruta=`/tmp/${Date.now()}.${esVideo?'mp4':'mp3'}`;
-  try{
-    await msg.reply(esVideo?'⏳ Bajando VIDEO 720p HQ...':'⏳ Bajando AUDIO HQ...');
-    const info=await ytdl.getInfo(url);
-    if(esVideo && info.videoDetails.lengthSeconds>600){ await msg.reply('❌ +10 min muy largo para 720p, pide audio'); busy=false; return; }
-    await new Promise((res,rej)=>{
-      const stream=esVideo?ytdl(url,{quality:'highest',filter:f=>f.hasVideo&&f.hasAudio&&f.container==='mp4'}):ytdl(url,{filter:'audioonly',quality:'highestaudio',highWaterMark:1<<25});
-      stream.pipe(fs.createWriteStream(ruta)).on('finish',res).on('error',rej);
-    });
-    if(fs.statSync(ruta).size>95*1024*1024){ await msg.reply('❌ Pesa +95MB, no deja WhatsApp'); fs.unlinkSync(ruta); busy=false; return; }
-    const media=MessageMedia.fromFilePath(ruta);
-    await client.sendMessage(msg.from, media, {caption: esVideo?`🎬 720p - ${info.videoDetails.title}`:`🎧 HQ - ${info.videoDetails.title}`});
-  }catch(e){ await msg.reply('❌ Error: '+e.message.slice(0,100)); }
-  finally{ if(fs.existsSync(ruta)) fs.unlinkSync(ruta); busy=false; }
-}
-
-client.on('message_create', async msg=>{
-  try{
-    if(!msg.body) return;
-    const chat=await msg.getChat();
-    const esPropio=chat.id._serialized===client.info.wid._serialized;
-    if(msg.fromMe &&!esPropio &&!chat.isGroup) return;
-    const texto=msg.body.trim();
-    const link=extraerLink(texto);
-    if(link){ await descargar(msg,link,texto.toLowerCase().includes('video')); return; }
-    if(/^(video\s+)?[1-5]$/.test(texto.toLowerCase())){
-      const resu=cacheBusqueda.get(msg.from);
-      if(!resu) return;
-      const idx=parseInt(texto.match(/[1-5]/)[0])-1;
-      const v=resu[idx];
-      await descargar(msg,v.url,texto.toLowerCase().includes('video')); return;
+    authStrategy: new LocalAuth({
+        dataPath: './.wwebjs_auth'
+    }),
+    puppeteer: {
+        headless: true,
+        executablePath: puppeteer.executablePath(),
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--disable-gpu'
+        ]
     }
-    if(texto.length<2||texto.length>80) return;
-    console.log('Buscando:',texto);
-    await client.sendMessage(msg.from,`🔎 Buscando *"${texto}"*...`);
-    const b=await yts(texto);
-    const videos=b.videos.slice(0,5);
-    cacheBusqueda.set(msg.from,videos);
-    let m=`*📺 Resultados para:* ${texto}\n━━━━━━━━━━━━━━━━━━━━\n\n`;
-    videos.forEach((v,i)=>{ m+=`*${i+1}️⃣ ${v.title}*\n📺 ${v.author.name} • ⏱ ${v.timestamp} • 👁 ${v.views.toLocaleString()}\n🔗 ${v.url}\n\n`; });
-    m+=`━━━━━━━━━━━━━━━━━━━━\n👉 *1* al *5* = AUDIO HQ\n👉 *video 1* = VIDEO 720p\nEj: *2* o *video 3*`;
-    await msg.reply(m);
-  }catch(e){ console.log(e.message); }
 });
 
-client.initialize();
-app.get('/',(req,res)=>{
-  if(lastQR){
-    const img=`https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=${encodeURIComponent(lastQR)}`;
-    res.send(`<center><h1>Escanea QR con tu WhatsApp</h1><img src="${img}" style="width:380px;border:8px solid #000"><script>setTimeout(()=>location.reload(),10000)</script></center>`);
-  }else res.send('<center><h1>✅ BOT YT HD LISTO</h1><p>Escribe en tu chat (Tú) el nombre de una canción</p></center>');
+client.on('qr', (qr) => {
+    console.log('QR RECIBIDO - Ve a tu link de Render para escanearlo');
+    qrCodeData = qr;
 });
-app.listen(PORT,()=>console.log(PORT));
+
+client.on('ready', () => {
+    console.log('¡BOT LISTO Y CONECTADO!');
+    isReady = true;
+    qrCodeData = null;
+});
+
+client.on('authenticated', () => {
+    console.log('AUTENTICADO');
+});
+
+client.on('auth_failure', (m) => {
+    console.log('FALLO AUTH:', m);
+});
+
+client.on('disconnected', (reason) => {
+    console.log('Desconectado:', reason);
+    isReady = false;
+});
+
+client.on('message', async msg => {
+    if (msg.from.endsWith('@g.us')) return; // ignora grupos si quieres, borra esta linea si quieres grupos
+    const body = msg.body || '';
+    if (!body.toLowerCase().startsWith('!play ')) return;
+
+    const query = body.slice(6).trim();
+    if (!query) return msg.reply('Escribe !play nombre de cancion');
+
+    try {
+        msg.reply(`🔍 Buscando: *${query}*...`);
+        const r = await yts(query);
+        if (!r.videos.length) return msg.reply('No encontré nada');
+        const video = r.videos[0];
+        await msg.reply(`*${video.title}*\nDuración: ${video.timestamp}\n${video.url}\n\n_Esta función de descarga está en proceso, por ahora solo búsqueda._`);
+    } catch (e) {
+        console.log('Error !play:', e.message);
+        msg.reply('Error buscando la canción');
+    }
+});
+
+client.initialize().catch(err => {
+    console.log('Error initialize:', err);
+});
