@@ -1,7 +1,0 @@
-services:
-    - type: web
-    name: bot-yt-pro
-    env: node
-    plan: free
-    buildCommand: npm install && npx puppeteer browsers install chrome
-    startCommand: node bot.js
