@@ -1,54 +1,72 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode');
 const express = require('express');
-const yts = require('yt-search');
-const path = require('path');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const qrcode = require('qrcode-terminal');
 const fs = require('fs');
+const ytdlp = require('yt-dlp-exec');
 
 const app = express();
-let qrCodeData = null;
-let isReady = false;
+const PORT = 10000;
 
 app.get('/', (req, res) => {
-    if (isReady) res.send('<h1 style="font-family:sans-serif;text-align:center;margin-top:50px">✅ BOT CONECTADO Y ACTIVO</h1>');
-    else if (qrCodeData) {
-        qrcode.toDataURL(qrCodeData, (err, url) => {
-            if (err) return res.send('Error');
-            res.send(`<div style="text-align:center;margin-top:20px;font-family:sans-serif"><h2>Escanea QR</h2><img src="${url}" style="width:300px"><br><p>Se actualiza cada 15s</p><script>setTimeout(()=>location.reload(),15000)</script></div>`);
-        });
-    } else res.send('<h1 style="font-family:sans-serif;text-align:center;margin-top:50px">Iniciando... recarga en 20s</h1>');
-});
-app.listen(process.env.PORT || 10000, () => console.log('WEB OK'));
-
-const client = new Client({
-    authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
-    puppeteer: { headless: true, args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--single-process','--no-zygote'] }
+  res.send('BOT ON - No se duerme');
 });
 
-client.on('qr', (qr) => { console.log('QR RECIBIDO'); qrCodeData = qr; });
-client.on('ready', () => { console.log('BOT LISTO'); isReady = true; qrCodeData = null; });
+app.listen(PORT, () => console.log(`WEB OK en puerto ${PORT}`));
 
-// ESTE ES EL FIX: message_create SI escucha cuando te hablas a ti mismo
-client.on('message_create', async msg => {
-    try {
-        const body = msg.body || '';
-        console.log('Mensaje recibido:', body, 'fromMe:', msg.fromMe, 'from:', msg.from);
-        if (!body.toLowerCase().startsWith('!play')) return;
-        if (msg.from.endsWith('@g.us')) return; // ignora grupos
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState('auth');
+  
+  const sock = makeWASocket({
+    auth: state,
+    printQRInTerminal: false,
+    browser: ['Bot-YT', 'Chrome', '1.0']
+  });
 
-        let query = body.slice(5).trim(); // quita !play
-        if (!query) {
-            return await msg.reply('Escribe: !play nombre de cancion\nEj: !play bad bunny');
-        }
+  sock.ev.on('creds.update', saveCreds);
 
-        const r = await yts(query);
-        const video = r.videos[0];
-        if (!video) return await msg.reply('No encontré esa canción');
-        
-        await msg.reply(`*${video.title}*\n${video.url}\n\n_Duración: ${video.timestamp}_`);
-    } catch(e) {
-        console.log('Error en !play:', e.message);
+  sock.ev.on('connection.update', (update) => {
+    const { connection, qr } = update;
+    if (qr) {
+      console.log('QR RECIBIDO - Escanealo:');
+      qrcode.generate(qr, { small: true });
     }
-});
+    if (connection === 'open') console.log('BOT CONECTADO OK');
+    if (connection === 'close') {
+      console.log('Desconectado, reconectando...');
+      startBot();
+    }
+  });
 
-client.initialize();
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    const m = messages[0];
+    if (!m.message || m.key.fromMe) return;
+    
+    const text = m.message.conversation || m.message.extendedTextMessage?.text || '';
+    const from = m.key.remoteJid;
+
+    if (text.includes('youtube.com') || text.includes('youtu.be')) {
+      await sock.sendMessage(from, { text: '⏳ Descargando video/audio...' });
+      
+      try {
+        const fileName = `video_${Date.now()}.mp4`;
+        await ytdlp(text, {
+          output: fileName,
+          format: 'best[ext=mp4]/best'
+        });
+
+        if (fs.existsSync(fileName)) {
+          await sock.sendMessage(from, {
+            video: fs.readFileSync(fileName),
+            caption: '✅ Video descargado'
+          });
+          fs.unlinkSync(fileName);
+        }
+      } catch (e) {
+        console.log(e);
+        await sock.sendMessage(from, { text: '❌ Error al descargar. Intenta con otro link.' });
+      }
+    }
+  });
+}
+
+startBot();
