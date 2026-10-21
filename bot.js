@@ -1,6 +1,5 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, jidNormalizedUser } = require('@whiskeysockets/baileys');
 const express = require('express');
-const yts = require('yt-search');
 const QRCode = require('qrcode');
 const pino = require('pino');
 const fs = require('fs');
@@ -62,7 +61,6 @@ async function start() {
     }
   });
 
-  // CORRECCIÓN DEFINITIVA: Se elimina el filtro 'type' para capturar tanto 'notify' como 'append' (auto-mensajes)
   sock.ev.on('messages.upsert', async (chatUpdate) => {
     try {
       if (!chatUpdate.messages || chatUpdate.messages.length === 0) return;
@@ -74,8 +72,8 @@ async function start() {
       
       if (remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') return;
 
-      // El JID de destino siempre será tu propio número si interactúas contigo mismo
-      const targetJid = m.key.fromMe ? myJid : remoteJid;
+      // Forzar que el JID destino siempre apunte de forma nativa a tu propio chat
+      const targetJid = (remoteJid === 'me' || m.key.fromMe) ? myJid : remoteJid;
 
       const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
       if (!txt) return;
@@ -87,7 +85,7 @@ async function start() {
         return;
       }
 
-      // Procesar la selección numérica de descarga
+      // Procesar selección de descarga numérica
       const args = t.split(' ');
       const num = parseInt(args[0]);
 
@@ -99,40 +97,27 @@ async function start() {
         const v = lastSearch[targetJid][num - 1];
         delete lastSearch[targetJid]; 
 
-        await sock.sendMessage(targetJid, { text: `📥 Descargando *${format.toUpperCase()}* de:\n_${v.title}_\n\nPor favor, espera... ⏳` });
+        await sock.sendMessage(targetJid, { text: `📥 Descargando *${format.toUpperCase()}* de:\n_${v.title}_\n\nEsto puede tomar un minuto... ⏳` });
 
         const tempFile = path.join(__dirname, `${Date.now()}.${format}`);
-        
-        let command = '';
-        if (format === 'mp3') {
-          command = `yt-dlp -f bestaudio --extract-audio --audio-format mp3 -o "${tempFile}" "${v.url}"`;
-        } else {
-          command = `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" -o "${tempFile}" "${v.url}"`;
-        }
+        let command = format === 'mp3' 
+          ? `yt-dlp -f bestaudio --extract-audio --audio-format mp3 -o "${tempFile}" "${v.url}"`
+          : `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" -o "${tempFile}" "${v.url}"`;
 
         exec(command, async (error) => {
           if (error) {
-            console.error(error);
-            await sock.sendMessage(targetJid, { text: '❌ Error al descargar el archivo con yt-dlp.' });
+            await sock.sendMessage(targetJid, { text: '❌ Falló la descarga multimedia.' });
             return;
           }
 
           try {
             if (format === 'mp3') {
-              await sock.sendMessage(targetJid, { 
-                audio: { url: tempFile }, 
-                mimetype: 'audio/mp4', 
-                fileName: `${v.title}.mp3` 
-              });
+              await sock.sendMessage(targetJid, { audio: { url: tempFile }, mimetype: 'audio/mp4', fileName: `${v.title}.mp3` });
             } else {
-              await sock.sendMessage(targetJid, { 
-                video: { url: tempFile }, 
-                caption: `🎬 *${v.title}*`,
-                mimetype: 'video/mp4' 
-              });
+              await sock.sendMessage(targetJid, { video: { url: tempFile }, caption: `🎬 *${v.title}*`, mimetype: 'video/mp4' });
             }
           } catch (err) {
-            await sock.sendMessage(targetJid, { text: '❌ Error al enviar el archivo a tu WhatsApp.' });
+            await sock.sendMessage(targetJid, { text: '❌ Error al subir el archivo al chat.' });
           } finally {
             if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
           }
@@ -140,30 +125,39 @@ async function start() {
         return;
       }
 
-      // Búsqueda de videos en YouTube si el mensaje no es numérico
-      if (isNaN(num) && t.length > 2) {
-        const r = await yts(txt);
-        const vids = r.videos.slice(0, 3);
-        if (!vids.length) {
-          await sock.sendMessage(targetJid, { text: 'No encontré resultados en YouTube.' });
-          return;
-        }
+      // Búsqueda integrada a través del CLI nativo de yt-dlp
+      if (t.length > 2) {
+        const searchQuery = txt.replace(/"/g, '\\"');
+        const searchCmd = `yt-dlp "ytsearch3:${searchQuery}" --dump-json --flat-playlist`;
 
-        lastSearch[targetJid] = vids;
-        
-        let msg = `🎵 *Videos encontrados:*\n\n`;
-        for (let i = 0; i < vids.length; i++) {
-          msg += `*${i + 1}.* ${vids[i].title}\n⏱️ Duración: _${vids[i].timestamp}_\n\n`;
-        }
-        msg += `👉 Responde con el número y formato.\nEjemplos:\n*1 mp3* (Para audio)\n*1 mp4* (Para video)`;
+        exec(searchCmd, async (error, stdout) => {
+          if (error || !stdout) return;
 
-        await sock.sendMessage(targetJid, { 
-          image: { url: vids[0].thumbnail }, 
-          caption: msg 
+          try {
+            const lines = stdout.trim().split('\n');
+            const results = [];
+            let msg = `🎵 *Resultados de YouTube encontrados:*\n\n`;
+
+            for (let i = 0; i < lines.length; i++) {
+              const videoData = JSON.parse(lines[i]);
+              results.push({
+                title: videoData.title,
+                url: `https://youtube.com{videoData.id}`
+              });
+              msg += `*${i + 1}.* ${videoData.title}\n\n`;
+            }
+
+            lastSearch[targetJid] = results;
+            msg += `👉 Responde con el número y formato.\nEjemplos:\n*1 mp3* (Para audio)\n*1 mp4* (Para video)`;
+
+            await sock.sendMessage(targetJid, { text: msg });
+          } catch (e) {
+            console.error(e);
+          }
         });
       }
-    } catch (e) {
-      console.error(e);
+    } catch (error) {
+      console.error(error);
     }
   });
 }
