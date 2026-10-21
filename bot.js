@@ -62,20 +62,19 @@ async function start() {
     }
   });
 
+  // CORRECCIÓN DEFINITIVA: Se elimina el filtro 'type' para capturar tanto 'notify' como 'append' (auto-mensajes)
   sock.ev.on('messages.upsert', async (chatUpdate) => {
     try {
       if (!chatUpdate.messages || chatUpdate.messages.length === 0) return;
       const m = chatUpdate.messages[0]; 
       if (!m.message) return;
 
-      // CORRECCIÓN CLAVE: Detectar si el mensaje es propio y normalizar el JID
       const myJid = jidNormalizedUser(sock.user.id);
       const remoteJid = m.key.remoteJid;
       
-      // Si el mensaje es en un grupo o estado, lo ignoramos
       if (remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') return;
 
-      // Definimos el jid definitivo al que responderemos
+      // El JID de destino siempre será tu propio número si interactúas contigo mismo
       const targetJid = m.key.fromMe ? myJid : remoteJid;
 
       const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
@@ -88,7 +87,7 @@ async function start() {
         return;
       }
 
-      // Detectar selección (Ej: "1 mp3" o "2 mp4")
+      // Procesar la selección numérica de descarga
       const args = t.split(' ');
       const num = parseInt(args[0]);
 
@@ -114,7 +113,7 @@ async function start() {
         exec(command, async (error) => {
           if (error) {
             console.error(error);
-            await sock.sendMessage(targetJid, { text: '❌ Error al descargar el video con yt-dlp.' });
+            await sock.sendMessage(targetJid, { text: '❌ Error al descargar el archivo con yt-dlp.' });
             return;
           }
 
@@ -141,12 +140,12 @@ async function start() {
         return;
       }
 
-      // Procesar búsqueda de videos
-      if (t.length > 2) {
+      // Búsqueda de videos en YouTube si el mensaje no es numérico
+      if (isNaN(num) && t.length > 2) {
         const r = await yts(txt);
         const vids = r.videos.slice(0, 3);
         if (!vids.length) {
-          await sock.sendMessage(targetJid, { text: 'No encontré resultados.' });
+          await sock.sendMessage(targetJid, { text: 'No encontré resultados en YouTube.' });
           return;
         }
 
