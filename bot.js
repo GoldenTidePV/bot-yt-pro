@@ -12,7 +12,6 @@ let lastQR = null;
 let lastSearch = {};
 const SESSION_FILE = './auth_session';
 
-// Crear carpeta temporal si no existe
 if (!fs.existsSync(SESSION_FILE)) fs.mkdirSync(SESSION_FILE, { recursive: true });
 
 app.get('/ping', (req, res) => res.send('ok'));
@@ -20,14 +19,13 @@ app.get('/', async (req, res) => {
   if (process.env.WA_SESSION_DATA) return res.send('<h1>BOT CONECTADO VÍA VARIABLES DE ENTORNO</h1><p>Tu sesión ya está guardada de forma segura en Render.</p>');
   if (!lastQR) return res.send('<h1>BOT CONECTADO</h1><p>Ya has iniciado sesión.</p>');
   const img = await QRCode.toDataURL(lastQR);
-  res.send(`<h1>Escanea este QR desde tu WhatsApp</h1><img src="${img}" style="width:350px"><br><p>Una vez escaneado, revisa los logs en Render para copiar tu código de sesión persistente.</p>`);
+  res.send(`<h1>Escanea este QR desde tu WhatsApp</h1><img src="${img}" style="width:350px">`);
 });
 app.listen(process.env.PORT || 10000, () => console.log('Servidor listo'));
 
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_FILE);
 
-  // Inyección de credenciales guardadas en la nube para evitar perder el QR en Render
   if (process.env.WA_SESSION_DATA && !fs.existsSync(`${SESSION_FILE}/creds.json`)) {
     try {
       const decryptedCreds = Buffer.from(process.env.WA_SESSION_DATA, 'base64').toString('utf-8');
@@ -42,34 +40,40 @@ async function start() {
     auth: state,
     printQRInTerminal: true,
     logger: pino({ level: 'silent' }),
+    // Habilitamos explícitamente el procesamiento de mensajes enviados por nuestro propio usuario
     broadcastPosition: false
   });
 
   sock.ev.on('creds.update', async () => {
     await saveCreds();
-    // Mostrar en los logs de Render la sesión en base64 para guardarla
     if (fs.existsSync(`${SESSION_FILE}/creds.json`)) {
       const credsRaw = fs.readFileSync(`${SESSION_FILE}/creds.json`, 'utf-8');
       const base64Session = Buffer.from(credsRaw).toString('base64');
-      console.log('\n======================================\n👉 TU CÓDIGO DE SESIÓN PERSISTENTE (COPIA TODO ESTO):\n' + base64Session + '\n======================================\n');
+      console.log('\n======================================\n👉 TU CÓDIGO DE SESIÓN PERSISTENTE:\n' + base64Session + '\n======================================\n');
     }
   });
 
   sock.ev.on('connection.update', (u) => {
     const { connection, lastDisconnect, qr } = u;
     if (qr) lastQR = qr;
-    if (connection === 'open') { lastQR = null; console.log('🚀 ¡BOT CONECTADO A WHATSAPP!'); }
+    if (connection === 'open') { lastQR = null; console.log('🚀 ¡BOT WHATSAPP CONECTADO!'); }
     if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       if (shouldReconnect) start();
     }
   });
 
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    const m = messages[0]; // Corrección para asegurar que tome el primer mensaje del array
-    if (!m.message) return;
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    // CORRECCIÓN CLAVE: Baileys recibe los mensajes en un array. Obtenemos el primer objeto.
+    const m = messages[0]; 
+    if (!m || !m.message) return;
 
     const jid = m.key.remoteJid;
+    
+    // Ignorar mensajes de grupos o estados para evitar colapsar la cuenta
+    if (jid.endsWith('@g.us') || jid === 'status@broadcast') return;
+
+    // Extraer el texto de forma segura
     const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
     if (!txt) return;
     const t = txt.trim().toLowerCase();
@@ -81,18 +85,18 @@ async function start() {
       return;
     }
 
-    // Procesar selección de descarga (Ej: "1 mp3", "2 mp4", "1 video", "3 audio")
+    // Procesar selección de descarga (Ej: "1 mp3", "2 mp4")
     const matchSelection = t.match(/^([1-3])\s*(mp3|mp4|audio|video)?\$/);
     if (matchSelection && lastSearch[jid]) {
       const index = parseInt(matchSelection[1]) - 1;
-      let format = matchSelection[2] || 'mp3'; // por defecto descarga mp3 si solo pones el número
+      let format = matchSelection[2] || 'mp3'; 
       if (format === 'audio') format = 'mp3';
       if (format === 'video') format = 'mp4';
 
       const v = lastSearch[jid][index];
-      delete lastSearch[jid]; // Limpiar estado de búsqueda
+      delete lastSearch[jid]; 
 
-      await sock.sendMessage(jid, { text: `📥 Procesando y descargando *${format.toUpperCase()}* de:\n_${v.title}_\n\nEsto puede tardar un minuto... ⏳` });
+      await sock.sendMessage(jid, { text: `📥 Procesando y descargando *${format.toUpperCase()}* de:\n_${v.title}_\n\nEsto puede tardar un momento... ⏳` });
 
       const tempFile = path.join(__dirname, `${Date.now()}.${format}`);
 
@@ -103,7 +107,6 @@ async function start() {
 
         stream.pipe(fileStream);
 
-        // CORRECCIÓN: Añadida la palabra clave 'async' a la función anónima
         fileStream.on('finish', async () => {
           try {
             if (format === 'mp3') {
@@ -120,16 +123,15 @@ async function start() {
               });
             }
           } catch (err) {
-            await sock.sendMessage(jid, { text: '❌ Error al enviar el archivo multimedia a WhatsApp.' });
+            await sock.sendMessage(jid, { text: '❌ Error al enviar el archivo multimedia.' });
           } finally {
             if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
           }
         });
 
-        // CORRECCIÓN: Añadida la palabra clave 'async' a la función anónima
         stream.on('error', async (err) => {
           console.error(err);
-          await sock.sendMessage(jid, { text: '❌ Error en los servidores de YouTube al descargar este video.' });
+          await sock.sendMessage(jid, { text: '❌ Error al descargar este video.' });
           if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
         });
 
@@ -140,13 +142,16 @@ async function start() {
       return;
     }
 
-    // Activar la búsqueda si el mensaje no es un comando y no tienes búsquedas pendientes
-    if (!lastSearch[jid] && jid.endsWith('@s.whatsapp.net')) {
+    // Iniciar búsqueda si escribes algo (y no hay una selección pendiente de 1, 2 o 3)
+    if (!lastSearch[jid]) {
       if (t.startsWith('http') || t.length > 2) {
         try {
           const r = await yts(txt);
           const vids = r.videos.slice(0, 3);
-          if (!vids.length) return;
+          if (!vids.length) {
+            await sock.sendMessage(jid, { text: 'No encontré resultados.' });
+            return;
+          }
 
           lastSearch[jid] = vids;
           
@@ -156,8 +161,9 @@ async function start() {
           }
           msg += `👉 Responde con el número y formato.\nEjemplos:\n*1 mp3* (Para audio)\n*1 mp4* (Para video)`;
 
+          // Enviamos el mensaje con la carátula del primer video encontrado
           await sock.sendMessage(jid, { 
-            image: { url: vids[0].thumbnail }, // Corrección: Selecciona la miniatura del primer video [0]
+            image: { url: vids[0].thumbnail }, 
             caption: msg 
           });
         } catch (err) {
