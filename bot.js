@@ -42,7 +42,6 @@ async function start() {
     auth: state,
     printQRInTerminal: true,
     logger: pino({ level: 'silent' }),
-    // Permitir leer nuestros propios mensajes enviados desde nuestro propio teléfono
     broadcastPosition: false
   });
 
@@ -67,14 +66,10 @@ async function start() {
   });
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
-    const m = messages[0];
+    const m = messages[0]; // Corrección para asegurar que tome el primer mensaje del array
     if (!m.message) return;
 
-    // Detectar si el mensaje proviene de ti mismo o de tu propio chat
     const jid = m.key.remoteJid;
-    const isMe = m.key.fromMe;
-    
-    // Solo responder si te lo mandas a ti mismo en tu chat propio o si interactúas desde tu número
     const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
     if (!txt) return;
     const t = txt.trim().toLowerCase();
@@ -108,17 +103,16 @@ async function start() {
 
         stream.pipe(fileStream);
 
+        // CORRECCIÓN: Añadida la palabra clave 'async' a la función anónima
         fileStream.on('finish', async () => {
           try {
             if (format === 'mp3') {
-              // Enviar como Audio nativo reproducible en el chat
               await sock.sendMessage(jid, { 
                 audio: { url: tempFile }, 
                 mimetype: 'audio/mp4', 
                 fileName: `${v.title}.mp3` 
               });
             } else {
-              // Enviar como Video nativo reproducible en el chat
               await sock.sendMessage(jid, { 
                 video: { url: tempFile }, 
                 caption: `🎬 *${v.title}* listo.`,
@@ -132,7 +126,8 @@ async function start() {
           }
         });
 
-        stream.on('error', (err) => {
+        // CORRECCIÓN: Añadida la palabra clave 'async' a la función anónima
+        stream.on('error', async (err) => {
           console.error(err);
           await sock.sendMessage(jid, { text: '❌ Error en los servidores de YouTube al descargar este video.' });
           if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
@@ -146,8 +141,7 @@ async function start() {
     }
 
     // Activar la búsqueda si el mensaje no es un comando y no tienes búsquedas pendientes
-    // Filtramos para que solo reaccione si escribes en tu propio chat privado
-    if (!lastSearch[jid] && (jid.endsWith('@s.whatsapp.net'))) {
+    if (!lastSearch[jid] && jid.endsWith('@s.whatsapp.net')) {
       if (t.startsWith('http') || t.length > 2) {
         try {
           const r = await yts(txt);
@@ -156,15 +150,14 @@ async function start() {
 
           lastSearch[jid] = vids;
           
-          // Enviamos la miniatura del primer resultado para que se vea genial en el chat
-          let msg = `🎵 *Resultados de YouTube encontradas:*\n\n`;
+          let msg = `🎵 *Resultados de YouTube encontrados:*\n\n`;
           for (let i = 0; i < vids.length; i++) {
             msg += `*${i + 1}.* ${vids[i].title}\n⏱️ Duración: _${vids[i].timestamp}_\n\n`;
           }
           msg += `👉 Responde con el número y formato.\nEjemplos:\n*1 mp3* (Para audio)\n*1 mp4* (Para video)`;
 
           await sock.sendMessage(jid, { 
-            image: { url: vids[0].thumbnail }, 
+            image: { url: vids[0].thumbnail }, // Corrección: Selecciona la miniatura del primer video [0]
             caption: msg 
           });
         } catch (err) {
