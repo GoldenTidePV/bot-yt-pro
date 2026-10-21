@@ -1,0 +1,177 @@
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, BufferJSON, initAuthCreds } = require('@whiskeysockets/baileys');
+const express = require('express');
+const yts = require('yt-search');
+const QRCode = require('qrcode');
+const ytdl = require('@distube/ytdl-core');
+const pino = require('pino');
+const fs = require('fs');
+const path = require('path');
+
+const app = express();
+let lastQR = null;
+let lastSearch = {};
+const SESSION_FILE = './auth_session';
+
+// Crear carpeta temporal si no existe
+if (!fs.existsSync(SESSION_FILE)) fs.mkdirSync(SESSION_FILE, { recursive: true });
+
+app.get('/ping', (req, res) => res.send('ok'));
+app.get('/', async (req, res) => {
+  if (process.env.WA_SESSION_DATA) return res.send('<h1>BOT CONECTADO VÍA VARIABLES DE ENTORNO</h1><p>Tu sesión ya está guardada de forma segura en Render.</p>');
+  if (!lastQR) return res.send('<h1>BOT CONECTADO</h1><p>Ya has iniciado sesión.</p>');
+  const img = await QRCode.toDataURL(lastQR);
+  res.send(`<h1>Escanea este QR desde tu WhatsApp</h1><img src="${img}" style="width:350px"><br><p>Una vez escaneado, revisa los logs en Render para copiar tu código de sesión persistente.</p>`);
+});
+app.listen(process.env.PORT || 10000, () => console.log('Servidor listo'));
+
+async function start() {
+  const { state, saveCreds } = await useMultiFileAuthState(SESSION_FILE);
+
+  // Inyección de credenciales guardadas en la nube para evitar perder el QR en Render
+  if (process.env.WA_SESSION_DATA && !fs.existsSync(`${SESSION_FILE}/creds.json`)) {
+    try {
+      const decryptedCreds = Buffer.from(process.env.WA_SESSION_DATA, 'base64').toString('utf-8');
+      fs.writeFileSync(`${SESSION_FILE}/creds.json`, decryptedCreds);
+      console.log('=> Sesión importada exitosamente desde variables de entorno.');
+    } catch (e) {
+      console.log('Error cargando sesión persistente:', e);
+    }
+  }
+
+  const sock = makeWASocket({
+    auth: state,
+    printQRInTerminal: true,
+    logger: pino({ level: 'silent' }),
+    // Permitir leer nuestros propios mensajes enviados desde nuestro propio teléfono
+    broadcastPosition: false
+  });
+
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    // Mostrar en los logs de Render la sesión en base64 para guardarla
+    if (fs.existsSync(`${SESSION_FILE}/creds.json`)) {
+      const credsRaw = fs.readFileSync(`${SESSION_FILE}/creds.json`, 'utf-8');
+      const base64Session = Buffer.from(credsRaw).toString('base64');
+      console.log('\n======================================\n👉 TU CÓDIGO DE SESIÓN PERSISTENTE (COPIA TODO ESTO):\n' + base64Session + '\n======================================\n');
+    }
+  });
+
+  sock.ev.on('connection.update', (u) => {
+    const { connection, lastDisconnect, qr } = u;
+    if (qr) lastQR = qr;
+    if (connection === 'open') { lastQR = null; console.log('🚀 ¡BOT CONECTADO A WHATSAPP!'); }
+    if (connection === 'close') {
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      if (shouldReconnect) start();
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    const m = messages[0];
+    if (!m.message) return;
+
+    // Detectar si el mensaje proviene de ti mismo o de tu propio chat
+    const jid = m.key.remoteJid;
+    const isMe = m.key.fromMe;
+    
+    // Solo responder si te lo mandas a ti mismo en tu chat propio o si interactúas desde tu número
+    const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
+    if (!txt) return;
+    const t = txt.trim().toLowerCase();
+
+    // Cancelar la búsqueda actual
+    if (['cancelar', 'c', '0'].includes(t)) {
+      delete lastSearch[jid];
+      await sock.sendMessage(jid, { text: '❌ Búsqueda cancelada.' });
+      return;
+    }
+
+    // Procesar selección de descarga (Ej: "1 mp3", "2 mp4", "1 video", "3 audio")
+    const matchSelection = t.match(/^([1-3])\s*(mp3|mp4|audio|video)?\$/);
+    if (matchSelection && lastSearch[jid]) {
+      const index = parseInt(matchSelection[1]) - 1;
+      let format = matchSelection[2] || 'mp3'; // por defecto descarga mp3 si solo pones el número
+      if (format === 'audio') format = 'mp3';
+      if (format === 'video') format = 'mp4';
+
+      const v = lastSearch[jid][index];
+      delete lastSearch[jid]; // Limpiar estado de búsqueda
+
+      await sock.sendMessage(jid, { text: `📥 Procesando y descargando *${format.toUpperCase()}* de:\n_${v.title}_\n\nEsto puede tardar un minuto... ⏳` });
+
+      const tempFile = path.join(__dirname, `${Date.now()}.${format}`);
+
+      try {
+        const options = format === 'mp3' ? { filter: 'audioonly', quality: 'highestaudio' } : { format: 'mp4', quality: 'highest' };
+        const stream = ytdl(v.url, options);
+        const fileStream = fs.createWriteStream(tempFile);
+
+        stream.pipe(fileStream);
+
+        fileStream.on('finish', async () => {
+          try {
+            if (format === 'mp3') {
+              // Enviar como Audio nativo reproducible en el chat
+              await sock.sendMessage(jid, { 
+                audio: { url: tempFile }, 
+                mimetype: 'audio/mp4', 
+                fileName: `${v.title}.mp3` 
+              });
+            } else {
+              // Enviar como Video nativo reproducible en el chat
+              await sock.sendMessage(jid, { 
+                video: { url: tempFile }, 
+                caption: `🎬 *${v.title}* listo.`,
+                mimetype: 'video/mp4' 
+              });
+            }
+          } catch (err) {
+            await sock.sendMessage(jid, { text: '❌ Error al enviar el archivo multimedia a WhatsApp.' });
+          } finally {
+            if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+          }
+        });
+
+        stream.on('error', (err) => {
+          console.error(err);
+          await sock.sendMessage(jid, { text: '❌ Error en los servidores de YouTube al descargar este video.' });
+          if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+        });
+
+      } catch (e) {
+        await sock.sendMessage(jid, { text: '❌ Error al inicializar la descarga.' });
+        if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+      }
+      return;
+    }
+
+    // Activar la búsqueda si el mensaje no es un comando y no tienes búsquedas pendientes
+    // Filtramos para que solo reaccione si escribes en tu propio chat privado
+    if (!lastSearch[jid] && (jid.endsWith('@s.whatsapp.net'))) {
+      if (t.startsWith('http') || t.length > 2) {
+        try {
+          const r = await yts(txt);
+          const vids = r.videos.slice(0, 3);
+          if (!vids.length) return;
+
+          lastSearch[jid] = vids;
+          
+          // Enviamos la miniatura del primer resultado para que se vea genial en el chat
+          let msg = `🎵 *Resultados de YouTube encontradas:*\n\n`;
+          for (let i = 0; i < vids.length; i++) {
+            msg += `*${i + 1}.* ${vids[i].title}\n⏱️ Duración: _${vids[i].timestamp}_\n\n`;
+          }
+          msg += `👉 Responde con el número y formato.\nEjemplos:\n*1 mp3* (Para audio)\n*1 mp4* (Para video)`;
+
+          await sock.sendMessage(jid, { 
+            image: { url: vids[0].thumbnail }, 
+            caption: msg 
+          });
+        } catch (err) {
+          console.error('Error buscando en YT:', err);
+        }
+      }
+    }
+  });
+}
+start();
