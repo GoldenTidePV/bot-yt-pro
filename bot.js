@@ -4,7 +4,7 @@ const QRCode = require('qrcode');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
-const { exec } = require('child_process');
+const http = require('https');
 
 const app = express();
 let lastQR = null;
@@ -70,9 +70,7 @@ async function start() {
       
       if (remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') return;
 
-      // El destino siempre será tu propio chat si interactúas contigo mismo
       const targetJid = (remoteJid === 'me' || m.key.fromMe) ? myJid : remoteJid;
-
       const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
       if (!txt) return;
       const t = txt.trim().toLowerCase();
@@ -83,10 +81,10 @@ async function start() {
         return;
       }
 
-      // Analizar comandos (Ej: "1 mp3", "2 mp4")
       const args = t.split(/\s+/);
       const num = parseInt(args[0]);
 
+      // Lógica de descarga nativa mediante API externa libre de bloqueos locales
       if (!isNaN(num) && num >= 1 && num <= 3 && lastSearch[targetJid]) {
         let format = args[1] || 'mp3';
         if (format === 'audio') format = 'mp3';
@@ -95,64 +93,69 @@ async function start() {
         const v = lastSearch[targetJid][num - 1];
         delete lastSearch[targetJid]; 
 
-        await sock.sendMessage(targetJid, { text: `📥 Descargando *${format.toUpperCase()}* de:\n_${v.title}_\n\nEsto puede tomar un minuto... ⏳` });
+        await sock.sendMessage(targetJid, { text: `📥 Descargando *${format.toUpperCase()}* de:\n_${v.title}_\n\nPor favor, espera un momento... ⏳` });
 
+        const apiDownloadUrl = `https://workers.dev{format}?url=${encodeURIComponent(v.url)}`;
         const tempFile = path.join(__dirname, `${Date.now()}.${format}`);
-        let command = format === 'mp3' 
-          ? `yt-dlp -f bestaudio --extract-audio --audio-format mp3 -o "${tempFile}" "${v.url}"`
-          : `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" -o "${tempFile}" "${v.url}"`;
+        const fileStream = fs.createWriteStream(tempFile);
 
-        exec(command, async (error) => {
-          if (error) {
-            await sock.sendMessage(targetJid, { text: '❌ Falló la descarga multimedia con yt-dlp.' });
-            return;
-          }
-
-          try {
-            if (format === 'mp3') {
-              await sock.sendMessage(targetJid, { audio: { url: tempFile }, mimetype: 'audio/mp4', fileName: `${v.title}.mp3` });
-            } else {
-              await sock.sendMessage(targetJid, { video: { url: tempFile }, caption: `🎬 *${v.title}*`, mimetype: 'video/mp4' });
+        http.get(apiDownloadUrl, (response) => {
+          response.pipe(fileStream);
+          fileStream.on('finish', async () => {
+            try {
+              if (format === 'mp3') {
+                await sock.sendMessage(targetJid, { audio: { url: tempFile }, mimetype: 'audio/mp4', fileName: `${v.title}.mp3` });
+              } else {
+                await sock.sendMessage(targetJid, { video: { url: tempFile }, caption: `🎬 *${v.title}*`, mimetype: 'video/mp4' });
+              }
+            } catch (err) {
+              await sock.sendMessage(targetJid, { text: '❌ Error al subir el archivo multimedia al chat.' });
+            } finally {
+              if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
             }
-          } catch (err) {
-            await sock.sendMessage(targetJid, { text: '❌ Error al subir el archivo al chat.' });
-          } finally {
-            if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
-          }
+          });
+        }).on('error', async () => {
+          await sock.sendMessage(targetJid, { text: '❌ Falló la conexión con el servidor de descargas.' });
+          if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
         });
         return;
       }
 
-      // Búsqueda en YouTube usando la herramienta yt-dlp nativa del sistema
+      // Búsqueda nativa mediante raspado HTML básico para evitar fallos de APIs
       if (isNaN(num) && t.length > 2) {
-        const searchQuery = txt.replace(/"/g, '\\"');
-        const searchCmd = `yt-dlp "ytsearch3:${searchQuery}" --dump-json --flat-playlist`;
+        const searchUrl = `https://youtube.com{encodeURIComponent(txt)}`;
+        
+        http.get(searchUrl, (res) => {
+          let data = '';
+          res.on('data', (chunk) => data += chunk);
+          res.on('end', async () => {
+            try {
+              const regex = /"videoRenderer":{"videoId":"([^"]+)","title":{"runs":\[{"text":"([^"]+)"\}\]/g;
+              const results = [];
+              let match;
+              let msg = `🎵 *Resultados de YouTube:*\n\n`;
+              let count = 0;
 
-        exec(searchCmd, async (error, stdout) => {
-          if (error || !stdout) return;
+              while ((match = regex.exec(data)) !== null && count < 3) {
+                const id = match[1];
+                const title = match[2];
+                results.push({ title, url: `https://youtube.com{id}` });
+                msg += `*${count + 1}.* ${title}\n\n`;
+                count++;
+              }
 
-          try {
-            const lines = stdout.trim().split('\n');
-            const results = [];
-            let msg = `🎵 *Resultados de YouTube encontrados: * \n\n`;
+              if (results.length === 0) {
+                await sock.sendMessage(targetJid, { text: '❌ No se encontraron videos disponibles.' });
+                return;
+              }
 
-            for (let i = 0; i < lines.length; i++) {
-              if (!lines[i]) continue;
-              const videoData = JSON.parse(lines[i]);
-              results.push({
-                title: videoData.title,
-                url: `https://youtube.com{videoData.id}`
-              });
-              msg += `*${i + 1}. * ${videoData.title}\n\n`;
+              lastSearch[targetJid] = results;
+              msg += `👉 Responde con el número y formato.\nEjemplos:\n*1 mp3* (Para audio)\n*1 mp4* (Para video)`;
+              await sock.sendMessage(targetJid, { text: msg });
+            } catch (e) {
+              console.error(e);
             }
-
-            lastSearch[targetJid] = results;
-            msg += `👉 Responde con el número y formato.\nEjemplos:\n*1 mp3* (Para audio)\n*1 mp4* (Para video)`;
-
-            await sock.sendMessage(targetJid, { text: msg });
-          } catch (e) {
-            console.error(e);
-          }
+          });
         });
       }
     } catch (err) {
