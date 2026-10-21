@@ -62,42 +62,44 @@ async function start() {
     }
   });
 
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    // CORRECCIÓN: Extraer el primer mensaje correctamente del array 'messages'
-    if (!messages || !messages[0]) return;
-    const m = messages[0]; 
-    if (!m.message) return;
+  // CORRECCIÓN GENERAL: Escucha todo tipo de mensajes sin filtrar 'notify' ni 'fromMe'
+  sock.ev.on('messages.upsert', async (chatUpdate) => {
+    try {
+      if (!chatUpdate.messages || chatUpdate.messages.length === 0) return;
+      const m = chatUpdate.messages[0];
+      if (!m.message) return;
 
-    const jid = m.key.remoteJid;
-    if (jid.endsWith('@g.us') || jid === 'status@broadcast') return;
+      const jid = m.key.remoteJid;
+      // Bloquear grupos o estados para evitar comportamientos extraños
+      if (jid.endsWith('@g.us') || jid === 'status@broadcast') return;
 
-    const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
-    if (!txt) return;
-    const t = txt.trim().toLowerCase();
+      // Obtener el texto del mensaje entrante de manera segura
+      const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
+      if (!txt) return;
+      const t = txt.trim().toLowerCase();
 
-    // Cancelar la búsqueda actual
-    if (['cancelar', 'c', '0'].includes(t)) {
-      delete lastSearch[jid];
-      await sock.sendMessage(jid, { text: '❌ Búsqueda cancelada.' });
-      return;
-    }
+      // Cancelar la búsqueda actual
+      if (['cancelar', 'c', '0'].includes(t)) {
+        delete lastSearch[jid];
+        await sock.sendMessage(jid, { text: '❌ Búsqueda cancelada.' });
+        return;
+      }
 
-    // CORRECCIÓN: Expresión regular simplificada para capturar de forma exacta el número y el formato
-    const matchSelection = t.match(/^([1-3])\s*(mp3|mp4|audio|video)?\$/);
-    if (matchSelection && lastSearch[jid]) {
-      const index = parseInt(matchSelection[1]) - 1;
-      let format = matchSelection[2] || 'mp3'; 
-      if (format === 'audio') format = 'mp3';
-      if (format === 'video') format = 'mp4';
+      // Procesar selección de descarga (Ej: "1 mp3", "2 mp4")
+      const matchSelection = t.match(/^([1-3])\s*(mp3|mp4|audio|video)?\$/);
+      if (matchSelection && lastSearch[jid]) {
+        const index = parseInt(matchSelection[1]) - 1;
+        let format = matchSelection[2] || 'mp3'; 
+        if (format === 'audio') format = 'mp3';
+        if (format === 'video') format = 'mp4';
 
-      const v = lastSearch[jid][index];
-      delete lastSearch[jid]; 
+        const v = lastSearch[jid][index];
+        delete lastSearch[jid]; 
 
-      await sock.sendMessage(jid, { text: `📥 Procesando y descargando *${format.toUpperCase()}* de:\n_${v.title}_\n\nEsto puede tardar un momento... ⏳` });
+        await sock.sendMessage(jid, { text: `📥 Procesando y descargando *${format.toUpperCase()}* de:\n_${v.title}_\n\nEsto puede tardar un momento... ⏳` });
 
-      const tempFile = path.join(__dirname, `${Date.now()}.${format}`);
+        const tempFile = path.join(__dirname, `${Date.now()}.${format}`);
 
-      try {
         const options = format === 'mp3' ? { filter: 'audioonly', quality: 'highestaudio' } : { format: 'mp4', quality: 'highest' };
         const stream = ytdl(v.url, options);
         const fileStream = fs.createWriteStream(tempFile);
@@ -131,22 +133,16 @@ async function start() {
           await sock.sendMessage(jid, { text: '❌ Error al descargar este video.' });
           if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
         });
-
-      } catch (e) {
-        await sock.sendMessage(jid, { text: '❌ Error al inicializar la descarga.' });
-        if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+        return;
       }
-      return;
-    }
 
-    // Iniciar búsqueda
-    if (!lastSearch[jid]) {
-      if (t.startsWith('http') || t.length > 2) {
-        try {
+      // Iniciar búsqueda en YouTube si no hay selecciones activas
+      if (!lastSearch[jid]) {
+        if (t.startsWith('http') || t.length > 2) {
           const r = await yts(txt);
           const vids = r.videos.slice(0, 3);
           if (!vids.length) {
-            await sock.sendMessage(jid, { text: 'No encontré resultados.' });
+            await sock.sendMessage(jid, { text: 'No encontré resultados en YouTube.' });
             return;
           }
 
@@ -159,13 +155,13 @@ async function start() {
           msg += `👉 Responde con el número y formato.\nEjemplos:\n*1 mp3* (Para audio)\n*1 mp4* (Para video)`;
 
           await sock.sendMessage(jid, { 
-            image: { url: vids[0].thumbnail }, // CORRECCIÓN: Sintaxis correcta para la miniatura del primer video
+            image: { url: vids[0].thumbnail }, 
             caption: msg 
           });
-        } catch (err) {
-          console.error('Error buscando en YT:', err);
         }
       }
+    } catch (error) {
+      console.error('Error en el manejador de mensajes:', error);
     }
   });
 }
