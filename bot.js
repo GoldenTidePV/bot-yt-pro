@@ -61,10 +61,9 @@ async function start() {
     }
   });
 
-  sock.ev.on('messages.upsert', async (chatUpdate) => {
+  // Función interna para procesar el texto del mensaje
+  async function handleMessage(m) {
     try {
-      if (!chatUpdate.messages || chatUpdate.messages.length === 0) return;
-      const m = chatUpdate.messages[0]; 
       if (!m.message) return;
 
       const myJid = jidNormalizedUser(sock.user.id);
@@ -72,7 +71,7 @@ async function start() {
       
       if (remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') return;
 
-      // Forzar que el JID destino siempre apunte de forma nativa a tu propio chat
+      // Forzar que el destino de la respuesta siempre sea tu propio chat si el mensaje interactúa contigo
       const targetJid = (remoteJid === 'me' || m.key.fromMe) ? myJid : remoteJid;
 
       const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
@@ -85,8 +84,8 @@ async function start() {
         return;
       }
 
-      // Procesar selección de descarga numérica
-      const args = t.split(' ');
+      // Procesar selección de descarga numérica simplificada (Ej: "1 mp3", "2 mp4")
+      const args = t.split(/\s+/);
       const num = parseInt(args[0]);
 
       if (!isNaN(num) && num >= 1 && num <= 3 && lastSearch[targetJid]) {
@@ -125,8 +124,8 @@ async function start() {
         return;
       }
 
-      // Búsqueda integrada a través del CLI nativo de yt-dlp
-      if (t.length > 2) {
+      // Búsqueda integrada a través del CLI nativo de yt-dlp si no es comando numérico
+      if (isNaN(num) && t.length > 2) {
         const searchQuery = txt.replace(/"/g, '\\"');
         const searchCmd = `yt-dlp "ytsearch3:${searchQuery}" --dump-json --flat-playlist`;
 
@@ -139,6 +138,7 @@ async function start() {
             let msg = `🎵 *Resultados de YouTube encontrados:*\n\n`;
 
             for (let i = 0; i < lines.length; i++) {
+              if (!lines[i]) continue;
               const videoData = JSON.parse(lines[i]);
               results.push({
                 title: videoData.title,
@@ -156,8 +156,21 @@ async function start() {
           }
         });
       }
-    } catch (error) {
-      console.error(error);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  // DETECTOR DUPLICADO: Escucha tanto mensajes entrantes como tus propios mensajes salientes (auto-chat)
+  sock.ev.on('messages.upsert', async (chatUpdate) => {
+    if (chatUpdate.messages && chatUpdate.messages.length > 0) {
+      await handleMessage(chatUpdate.messages[0]);
+    }
+  });
+
+  sock.ev.on('messages.update', async (chatUpdate) => {
+    if (chatUpdate && chatUpdate.length > 0) {
+      await handleMessage(chatUpdate[0]);
     }
   });
 }
