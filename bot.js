@@ -61,7 +61,7 @@ async function start() {
     }
   });
 
-  // SOLUCIÓN RADICAL: Leer directamente del array de mensajes sin discriminar el tipo de evento de WhatsApp
+  // CORRECCIÓN FINAL: Captura de mensajes entrantes y salientes (tuyos) mapeados al identificador correcto
   sock.ev.on('messages.upsert', async (chatUpdate) => {
     try {
       if (!chatUpdate.messages || chatUpdate.messages.length === 0) return;
@@ -73,8 +73,8 @@ async function start() {
       
       if (remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') return;
 
-      // El JID de destino forzado siempre será tu propio número en auto-chats
-      const targetJid = (remoteJid === 'me' || m.key.fromMe || remoteJid === myJid) ? myJid : remoteJid;
+      // Forzar que si el mensaje es de uno mismo, el bot responda al canal personal de notas
+      const targetJid = (m.key.fromMe || remoteJid === 'me' || remoteJid === myJid) ? myJid : remoteJid;
 
       const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
       if (!txt) return;
@@ -89,7 +89,7 @@ async function start() {
       const args = t.split(/\s+/);
       const num = parseInt(args[0]);
 
-      // Lógica de descarga mediante API externa ultraligera
+      // Procesar descargas mediante API
       if (!isNaN(num) && num >= 1 && num <= 3 && lastSearch[targetJid]) {
         let format = args[1] || 'mp3';
         if (format === 'audio') format = 'mp3';
@@ -126,7 +126,7 @@ async function start() {
         return;
       }
 
-      // Búsqueda en YouTube mediante raspado directo
+      // Proceso de búsqueda
       if (isNaN(num) && t.length > 2) {
         const searchUrl = `https://youtube.com{encodeURIComponent(txt)}`;
         
