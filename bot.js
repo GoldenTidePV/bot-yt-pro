@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, jidNormalizedUser } = require('@whiskeysockets/baileys');
 const express = require('express');
 const yts = require('yt-search');
 const QRCode = require('qrcode');
@@ -68,16 +68,23 @@ async function start() {
       const m = chatUpdate.messages[0]; 
       if (!m.message) return;
 
-      const jid = m.key.remoteJid;
-      if (jid.endsWith('@g.us') || jid === 'status@broadcast') return;
+      // CORRECCIÓN CLAVE: Detectar si el mensaje es propio y normalizar el JID
+      const myJid = jidNormalizedUser(sock.user.id);
+      const remoteJid = m.key.remoteJid;
+      
+      // Si el mensaje es en un grupo o estado, lo ignoramos
+      if (remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') return;
+
+      // Definimos el jid definitivo al que responderemos
+      const targetJid = m.key.fromMe ? myJid : remoteJid;
 
       const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
       if (!txt) return;
       const t = txt.trim().toLowerCase();
 
       if (['cancelar', 'c', '0'].includes(t)) {
-        delete lastSearch[jid];
-        await sock.sendMessage(jid, { text: '❌ Búsqueda cancelada.' });
+        delete lastSearch[targetJid];
+        await sock.sendMessage(targetJid, { text: '❌ Búsqueda cancelada.' });
         return;
       }
 
@@ -85,19 +92,18 @@ async function start() {
       const args = t.split(' ');
       const num = parseInt(args[0]);
 
-      if (!isNaN(num) && num >= 1 && num <= 3 && lastSearch[jid]) {
+      if (!isNaN(num) && num >= 1 && num <= 3 && lastSearch[targetJid]) {
         let format = args[1] || 'mp3';
         if (format === 'audio') format = 'mp3';
         if (format === 'video') format = 'mp4';
 
-        const v = lastSearch[jid][num - 1];
-        delete lastSearch[jid]; 
+        const v = lastSearch[targetJid][num - 1];
+        delete lastSearch[targetJid]; 
 
-        await sock.sendMessage(jid, { text: `📥 Descargando *${format.toUpperCase()}* de:\n_${v.title}_\n\nPor favor, espera... ⏳` });
+        await sock.sendMessage(targetJid, { text: `📥 Descargando *${format.toUpperCase()}* de:\n_${v.title}_\n\nPor favor, espera... ⏳` });
 
         const tempFile = path.join(__dirname, `${Date.now()}.${format}`);
         
-        // Comando nativo usando yt-dlp (Descarga directa saltándose bloqueos)
         let command = '';
         if (format === 'mp3') {
           command = `yt-dlp -f bestaudio --extract-audio --audio-format mp3 -o "${tempFile}" "${v.url}"`;
@@ -108,26 +114,26 @@ async function start() {
         exec(command, async (error) => {
           if (error) {
             console.error(error);
-            await sock.sendMessage(jid, { text: '❌ Error al descargar el video. Intenta con otro título.' });
+            await sock.sendMessage(targetJid, { text: '❌ Error al descargar el video con yt-dlp.' });
             return;
           }
 
           try {
             if (format === 'mp3') {
-              await sock.sendMessage(jid, { 
+              await sock.sendMessage(targetJid, { 
                 audio: { url: tempFile }, 
                 mimetype: 'audio/mp4', 
                 fileName: `${v.title}.mp3` 
               });
             } else {
-              await sock.sendMessage(jid, { 
+              await sock.sendMessage(targetJid, { 
                 video: { url: tempFile }, 
                 caption: `🎬 *${v.title}*`,
                 mimetype: 'video/mp4' 
               });
             }
           } catch (err) {
-            await sock.sendMessage(jid, { text: '❌ Error al enviar el archivo a tu WhatsApp.' });
+            await sock.sendMessage(targetJid, { text: '❌ Error al enviar el archivo a tu WhatsApp.' });
           } finally {
             if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
           }
@@ -140,11 +146,11 @@ async function start() {
         const r = await yts(txt);
         const vids = r.videos.slice(0, 3);
         if (!vids.length) {
-          await sock.sendMessage(jid, { text: 'No encontré resultados.' });
+          await sock.sendMessage(targetJid, { text: 'No encontré resultados.' });
           return;
         }
 
-        lastSearch[jid] = vids;
+        lastSearch[targetJid] = vids;
         
         let msg = `🎵 *Videos encontrados:*\n\n`;
         for (let i = 0; i < vids.length; i++) {
@@ -152,7 +158,7 @@ async function start() {
         }
         msg += `👉 Responde con el número y formato.\nEjemplos:\n*1 mp3* (Para audio)\n*1 mp4* (Para video)`;
 
-        await sock.sendMessage(jid, { 
+        await sock.sendMessage(targetJid, { 
           image: { url: vids[0].thumbnail }, 
           caption: msg 
         });
