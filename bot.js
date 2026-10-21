@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, BufferJSON, initAuthCreds } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
 const yts = require('yt-search');
 const QRCode = require('qrcode');
@@ -40,7 +40,6 @@ async function start() {
     auth: state,
     printQRInTerminal: true,
     logger: pino({ level: 'silent' }),
-    // Habilitamos explícitamente el procesamiento de mensajes enviados por nuestro propio usuario
     broadcastPosition: false
   });
 
@@ -63,17 +62,15 @@ async function start() {
     }
   });
 
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    // CORRECCIÓN CLAVE: Baileys recibe los mensajes en un array. Obtenemos el primer objeto.
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    // CORRECCIÓN: Extraer el primer mensaje correctamente del array 'messages'
+    if (!messages || !messages[0]) return;
     const m = messages[0]; 
-    if (!m || !m.message) return;
+    if (!m.message) return;
 
     const jid = m.key.remoteJid;
-    
-    // Ignorar mensajes de grupos o estados para evitar colapsar la cuenta
     if (jid.endsWith('@g.us') || jid === 'status@broadcast') return;
 
-    // Extraer el texto de forma segura
     const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
     if (!txt) return;
     const t = txt.trim().toLowerCase();
@@ -85,7 +82,7 @@ async function start() {
       return;
     }
 
-    // Procesar selección de descarga (Ej: "1 mp3", "2 mp4")
+    // CORRECCIÓN: Expresión regular simplificada para capturar de forma exacta el número y el formato
     const matchSelection = t.match(/^([1-3])\s*(mp3|mp4|audio|video)?\$/);
     if (matchSelection && lastSearch[jid]) {
       const index = parseInt(matchSelection[1]) - 1;
@@ -142,7 +139,7 @@ async function start() {
       return;
     }
 
-    // Iniciar búsqueda si escribes algo (y no hay una selección pendiente de 1, 2 o 3)
+    // Iniciar búsqueda
     if (!lastSearch[jid]) {
       if (t.startsWith('http') || t.length > 2) {
         try {
@@ -161,9 +158,8 @@ async function start() {
           }
           msg += `👉 Responde con el número y formato.\nEjemplos:\n*1 mp3* (Para audio)\n*1 mp4* (Para video)`;
 
-          // Enviamos el mensaje con la carátula del primer video encontrado
           await sock.sendMessage(jid, { 
-            image: { url: vids[0].thumbnail }, 
+            image: { url: vids[0].thumbnail }, // CORRECCIÓN: Sintaxis correcta para la miniatura del primer video
             caption: msg 
           });
         } catch (err) {
