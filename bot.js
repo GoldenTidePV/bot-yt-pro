@@ -1,6 +1,7 @@
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, jidNormalizedUser } = require('@whiskeysockets/baileys');
 const express = require('express');
 const QRCode = require('qrcode');
+const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
 const http = require('https');
@@ -8,127 +9,160 @@ const http = require('https');
 const app = express();
 let lastQR = null;
 let lastSearch = {};
+const SESSION_FILE = './auth_session';
+
+if (!fs.existsSync(SESSION_FILE)) fs.mkdirSync(SESSION_FILE, { recursive: true });
 
 app.get('/ping', (req, res) => res.send('ok'));
 app.get('/', async (req, res) => {
-  if (!lastQR) return res.send('<h1>BOT CONECTADO</h1><p>Tu bot ya está activo y escuchando tu chat propio.</p>');
+  if (process.env.WA_SESSION_DATA) return res.send('<h1>BOT CONECTADO VÍA VARIABLES DE ENTORNO</h1>');
+  if (!lastQR) return res.send('<h1>BOT CONECTADO</h1>');
   const img = await QRCode.toDataURL(lastQR);
   res.send(`<h1>Escanea el QR</h1><img src="${img}" style="width:350px">`);
 });
-app.listen(process.env.PORT || 10000, () => console.log('Servidor web listo'));
+app.listen(process.env.PORT || 10000, () => console.log('Servidor listo'));
 
-// Inicializar el cliente que emula el navegador nativo
-const client = new Client({
-    authStrategy: new LocalAuth({ dataPath: './auth_session' }),
-    puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-    }
-});
+async function start() {
+  const { state, saveCreds } = await useMultiFileAuthState(SESSION_FILE);
 
-client.on('qr', (qr) => {
-    lastQR = qr;
-    console.log('Nuevo código QR generado. Por favor, escanéalo en la web.');
-});
-
-client.on('ready', () => {
-    lastQR = null;
-    console.log('🚀 ¡BOT TOTALMENTE CONECTADO A TU PROPIO NÚMERO!');
-});
-
-// EVENTO CLAVE: Escucha absolutamente todos los mensajes creados, incluidos los tuyos
-client.on('message_create', async (msg) => {
+  if (process.env.WA_SESSION_DATA && !fs.existsSync(`${SESSION_FILE}/creds.json`)) {
     try {
-        // Ignorar chats de grupos
-        if (msg.from.endsWith('@g.us') || msg.to.endsWith('@g.us')) return;
-
-        const chat = await msg.getChat();
-        const jid = chat.id._serialized;
-        const txt = msg.body ? msg.body.trim() : '';
-        if (!txt) return;
-        const t = txt.toLowerCase();
-
-        if (['cancelar', 'c', '0'].includes(t)) {
-            delete lastSearch[jid];
-            await client.sendMessage(jid, '❌ Búsqueda cancelada.');
-            return;
-        }
-
-        const args = t.split(/\s+/);
-        const num = parseInt(args[0]);
-
-        // Procesar selección numérica para descargas
-        if (!isNaN(num) && num >= 1 && num <= 3 && lastSearch[jid]) {
-            let format = args[1] || 'mp3';
-            if (format === 'audio') format = 'mp3';
-            if (format === 'video') format = 'mp4';
-
-            const v = lastSearch[jid][num - 1];
-            delete lastSearch[jid];
-
-            await client.sendMessage(jid, `📥 Descargando *${format.toUpperCase()}* de:\n_${v.title}_\n\nEspera un momento... ⏳`);
-
-            const apiDownloadUrl = `https://workers.dev{format}?url=${encodeURIComponent(v.url)}`;
-            const tempFile = path.join(__dirname, `${Date.now()}.${format}`);
-            const fileStream = fs.createWriteStream(tempFile);
-
-            http.get(apiDownloadUrl, (response) => {
-                response.pipe(fileStream);
-                fileStream.on('finish', async () => {
-                    try {
-                        const media = MessageMedia.fromFilePath(tempFile);
-                        if (format === 'mp3') {
-                            await client.sendMessage(jid, media, { sendAudioAsVoice: false });
-                        } else {
-                            await client.sendMessage(jid, media, { caption: `🎬 *${v.title}*` });
-                        }
-                    } catch (err) {
-                        await client.sendMessage(jid, '❌ Error al subir el archivo multimedia al chat.');
-                    } finally {
-                        if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
-                    }
-                });
-            }).on('error', async () => {
-                await client.sendMessage(jid, '❌ Falló la conexión con el servidor de descargas.');
-                if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
-            });
-            return;
-        }
-
-        // Búsqueda en YouTube mediante raspado nativo directo
-        if (isNaN(num) && t.length > 2) {
-            const searchUrl = `https://youtube.com{encodeURIComponent(txt)}`;
-            
-            http.get(searchUrl, (res) => {
-                let data = '';
-                res.on('data', (chunk) => data += chunk);
-                res.on('end', async () => {
-                    try {
-                        const regex = /"videoRenderer":{"videoId":"([^"]+)","title":{"runs":\[{"text":"([^"]+)"\}\]/g;
-                        const results = [];
-                        let match;
-                        let responseMsg = `🎵 *Resultados de YouTube:*\n\n`;
-                        let count = 0;
-
-                        while ((match = regex.exec(data)) !== null && count < 3) {
-                            results.push({ title: match[2], url: `https://youtube.com{match[1]}` });
-                            responseMsg += `*${count + 1}.* ${match[2]}\n\n`;
-                            count++;
-                        }
-
-                        if (results.length === 0) return;
-
-                        lastSearch[jid] = results;
-                        responseMsg += `👉 Responde con el número y formato.\nEjemplos:\n*1 mp3* (Para audio)\n*1 mp4* (Para video)`;
-                        await client.sendMessage(jid, responseMsg);
-                    } catch (e) {
-                        console.error(e);
-                    }
-                });
-            });
-        }
-    } catch (err) {
-        console.error(err);
+      const decryptedCreds = Buffer.from(process.env.WA_SESSION_DATA, 'base64').toString('utf-8');
+      fs.writeFileSync(`${SESSION_FILE}/creds.json`, decryptedCreds);
+      console.log('=> Sesión importada exitosamente.');
+    } catch (e) {
+      console.log('Error cargando sesión:', e);
     }
-});
+  }
 
-client.initialize();
+  const sock = makeWASocket({
+    auth: state,
+    printQRInTerminal: true,
+    logger: pino({ level: 'silent' }),
+    broadcastPosition: false
+  });
+
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    if (fs.existsSync(`${SESSION_FILE}/creds.json`)) {
+      const credsRaw = fs.readFileSync(`${SESSION_FILE}/creds.json`, 'utf-8');
+      const base64Session = Buffer.from(credsRaw).toString('base64');
+      console.log('\n======================================\n👉 TU CÓDIGO DE SESIÓN PERSISTENTE:\n' + base64Session + '\n======================================\n');
+    }
+  });
+
+  sock.ev.on('connection.update', (u) => {
+    const { connection, lastDisconnect, qr } = u;
+    if (qr) lastQR = qr;
+    if (connection === 'open') { lastQR = null; console.log('🚀 ¡BOT WHATSAPP CONECTADO!'); }
+    if (connection === 'close') {
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      if (shouldReconnect) start();
+    }
+  });
+
+  // SOLUCIÓN RADICAL: Leer directamente del array de mensajes sin discriminar el tipo de evento de WhatsApp
+  sock.ev.on('messages.upsert', async (chatUpdate) => {
+    try {
+      if (!chatUpdate.messages || chatUpdate.messages.length === 0) return;
+      const m = chatUpdate.messages[0]; 
+      if (!m.message) return;
+
+      const myJid = jidNormalizedUser(sock.user.id);
+      const remoteJid = m.key.remoteJid;
+      
+      if (remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') return;
+
+      // El JID de destino forzado siempre será tu propio número en auto-chats
+      const targetJid = (remoteJid === 'me' || m.key.fromMe || remoteJid === myJid) ? myJid : remoteJid;
+
+      const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
+      if (!txt) return;
+      const t = txt.trim().toLowerCase();
+
+      if (['cancelar', 'c', '0'].includes(t)) {
+        delete lastSearch[targetJid];
+        await sock.sendMessage(targetJid, { text: '❌ Búsqueda cancelada.' });
+        return;
+      }
+
+      const args = t.split(/\s+/);
+      const num = parseInt(args[0]);
+
+      // Lógica de descarga mediante API externa ultraligera
+      if (!isNaN(num) && num >= 1 && num <= 3 && lastSearch[targetJid]) {
+        let format = args[1] || 'mp3';
+        if (format === 'audio') format = 'mp3';
+        if (format === 'video') format = 'mp4';
+
+        const v = lastSearch[targetJid][num - 1];
+        delete lastSearch[targetJid]; 
+
+        await sock.sendMessage(targetJid, { text: `📥 Descargando *${format.toUpperCase()}* de:\n_${v.title}_\n\nPor favor, espera un momento... ⏳` });
+
+        const apiDownloadUrl = `https://workers.dev{format}?url=${encodeURIComponent(v.url)}`;
+        const tempFile = path.join(__dirname, `${Date.now()}.${format}`);
+        const fileStream = fs.createWriteStream(tempFile);
+
+        http.get(apiDownloadUrl, (response) => {
+          response.pipe(fileStream);
+          fileStream.on('finish', async () => {
+            try {
+              if (format === 'mp3') {
+                await sock.sendMessage(targetJid, { audio: { url: tempFile }, mimetype: 'audio/mp4', fileName: `${v.title}.mp3` });
+              } else {
+                await sock.sendMessage(targetJid, { video: { url: tempFile }, caption: `🎬 *${v.title}*`, mimetype: 'video/mp4' });
+              }
+            } catch (err) {
+              await sock.sendMessage(targetJid, { text: '❌ Error al subir el archivo multimedia al chat.' });
+            } finally {
+              if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+            }
+          });
+        }).on('error', async () => {
+          await sock.sendMessage(targetJid, { text: '❌ Falló la conexión con el servidor de descargas.' });
+          if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+        });
+        return;
+      }
+
+      // Búsqueda en YouTube mediante raspado directo
+      if (isNaN(num) && t.length > 2) {
+        const searchUrl = `https://youtube.com{encodeURIComponent(txt)}`;
+        
+        http.get(searchUrl, (res) => {
+          let data = '';
+          res.on('data', (chunk) => data += chunk);
+          res.on('end', async () => {
+            try {
+              const regex = /"videoRenderer":{"videoId":"([^"]+)","title":{"runs":\[{"text":"([^"]+)"\}\]/g;
+              const results = [];
+              let match;
+              let msg = `🎵 *Resultados de YouTube:*\n\n`;
+              let count = 0;
+
+              while ((match = regex.exec(data)) !== null && count < 3) {
+                const id = match[1];
+                const title = match[2];
+                results.push({ title, url: `https://youtube.com{id}` });
+                msg += `*${count + 1}.* ${title}\n\n`;
+                count++;
+              }
+
+              if (results.length === 0) return;
+
+              lastSearch[targetJid] = results;
+              msg += `👉 Responde con el número y formato.\nEjemplos:\n*1 mp3* (Para audio)\n*1 mp4* (Para video)`;
+              await sock.sendMessage(targetJid, { text: msg });
+            } catch (e) {
+              console.error(e);
+            }
+          });
+        });
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  });
+}
+start();
