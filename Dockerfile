@@ -1,7 +1,10 @@
 FROM node:20
 
-# Instalamos ffmpeg completo para asegurar compatibilidad de audio/video
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# Instalamos python3, ffmpeg y descargamos la herramienta oficial yt-dlp
+RUN apt-get update && apt-get install -y python3 python3-pip ffmpeg wget && \
+    wget https://github.com -O /usr/local/bin/yt-dlp && \
+    chmod a+rx /usr/local/bin/yt-dlp && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
